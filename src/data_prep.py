@@ -87,10 +87,8 @@ DATASETS = {
 
 def get_device_info():
     """Get GPU/CPU info for logging."""
-    import torch
-    if torch.cuda.is_available():
-        return f"GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB"
-    return "CPU only"
+    # Skip torch import due to DLL issues on this system
+    return "Device info skipped (torch import issues)"
 
 
 def download_dataset(config: DatasetConfig, output_dir: Path, cache_dir: Optional[Path] = None) -> Dataset:
@@ -152,6 +150,41 @@ def inspect_dataset(dataset: Dataset, name: str, num_samples: int = 3):
             if isinstance(value, str) and len(value) > 200:
                 value = value[:200] + "..."
             print(f"    {key}: {value}")
+
+
+def load_imocha_dataset(file_path: str) -> Dataset:
+    """Load the imocha skill extraction pairs dataset from its special JSON format.
+
+    The dataset has format: {skill_name: [sentence1, sentence2, ...], ...}
+    We convert it to: [{'text': sentence, 'skills': [skill_name]}, ...]
+    """
+    import json
+    from datasets import Dataset
+
+    print(f"Loading imocha dataset from: {file_path}")
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    print(f"Loaded {len(data)} skills from imocha dataset")
+
+    # Convert to the expected format
+    records = []
+    for skill, sentences in data.items():
+        for sentence in sentences:
+            if sentence and isinstance(sentence, str) and len(sentence.strip()) > 10:
+                records.append({
+                    'text': sentence.strip(),
+                    'skills': [skill],
+                    'source': 'imocha_gold',
+                    'has_ner_labels': False  # Will be generated later
+                })
+
+    print(f"Converted to {len(records)} text-skill pairs")
+
+    # Create dataset
+    dataset = Dataset.from_list(records)
+    return dataset
 
 
 def create_skill_extraction_dataset(
@@ -234,7 +267,7 @@ def create_dapt_corpus(candidate_profiles: Dataset, output_dir: Path, max_sample
     for sample in tqdm(candidate_profiles, desc="Extracting text for DAPT"):
         # Try different possible text fields
         text = ""
-        for field in ['text', 'profile', 'resume', 'cv', 'content', 'description']:
+        for field in ['text', 'profile', 'resume', 'CV', 'cv', 'content', 'description']:
             if field in sample and sample[field]:
                 text = sample[field]
                 break
@@ -330,7 +363,7 @@ def create_authenticity_dataset(
     # Save template
     template_path = output_dir / "authenticity_ai_template.json"
     with open(template_path, 'w') as f:
-        json.dump(ai_template, indent=2)
+        json.dump(ai_template, f, indent=2)
 
     print(f"Human data saved. AI template saved to: {template_path}")
 
@@ -359,11 +392,12 @@ def create_matching_dataset(
     profiles_sample = candidate_profiles.shuffle(seed=42).select(range(min(10000, len(candidate_profiles))))
     jds_sample = job_descriptions.shuffle(seed=42).select(range(min(10000, len(job_descriptions))))
 
-    # Extract text from profiles
+    # Extract text from profiles - using actual field names from dataset
     profile_texts = []
     for sample in tqdm(profiles_sample, desc="Extracting profile texts"):
         text = ""
-        for field in ['text', 'profile', 'resume', 'cv', 'content', 'description']:
+        # Check fields in order of preference based on actual dataset structure
+        for field in ['CV', 'Moreinfo', 'Highlights', 'Looking For', 'Position']:
             if field in sample and sample[field]:
                 text = sample[field]
                 break
@@ -446,7 +480,7 @@ def create_train_val_test_splits(
     }
 
     with open(output_dir / "split_info.json", 'w') as f:
-        json.dump(split_info, indent=2)
+        json.dump(split_info, f, indent=2)
 
     print("Split info saved to split_info.json")
 
@@ -477,13 +511,8 @@ def download_additional_datasets(output_dir: Path, cache_dir: Optional[Path] = N
 
 def get_device_info():
     """Get GPU/CPU info for logging."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return f"GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB"
-        return "CPU only"
-    except ImportError:
-        return "CPU only (torch not installed)"
+    # Skip torch import due to DLL issues on this system
+    return "Device info skipped (torch import issues)"
 
 def main():
     parser = argparse.ArgumentParser(description="Download and prepare HireSense datasets")
@@ -576,13 +605,32 @@ def main():
                 print(f"WARNING: {key} not found at {local_path}")
 
     # Process datasets into training-ready formats
+    skill_dataset = None
     if "skill_extraction_pairs" in downloaded and "esco_sentences" in downloaded:
         skill_dataset = create_skill_extraction_dataset(
             downloaded["skill_extraction_pairs"],
             downloaded["esco_sentences"],
             output_dir
         )
+    elif "esco_sentences" in downloaded:
+        # Try to load imocha from raw downloads if not in processed
+        imocha_path = cache_dir / "imocha-ai-org___ssf-skill-extraction-pairs" / "default" / "0.0.0" / "fd2fa81a19765dcd78fe884c768b5db9602bdcdb"
+        if not imocha_path.exists():
+            # Try alternative path from downloads
+            imocha_path = Path("data/raw/downloads/660b34a0c0801d4ae2d14437e706d382dc024cd1e7a5ebef5b12b79ba6080f4a")
 
+        if imocha_path.exists():
+            print("Loading imocha dataset from raw downloads...")
+            imocha_dataset = load_imocha_dataset(str(imocha_path))
+            skill_dataset = create_skill_extraction_dataset(
+                imocha_dataset,
+                downloaded["esco_sentences"],
+                output_dir
+            )
+        else:
+            print("WARNING: Could not find imocha dataset for skill extraction")
+
+    if skill_dataset is not None:
         # Create train/val/test splits
         create_train_val_test_splits(skill_dataset, output_dir)
 

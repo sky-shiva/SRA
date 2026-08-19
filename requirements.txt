@@ -16,6 +16,14 @@ pyyaml==6.0.1
 python-dotenv==1.0.1
 huggingface-hub==0.24.0
 
+# Skill Extractor dependencies
+seqeval==1.2.2
+
+# Authenticity Detector dependencies
+scikit-learn==1.5.0
+scipy==1.13.0
+joblib==1.4.0
+
 # GPU utilities
 bitsandbytes==0.44.0
 
